@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kolkata Healthcare Access Dashboard</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.0/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.0/dist/MarkerCluster.Default.css" />
+    <style>
+        body { margin:0; padding:0; font-family:'Segoe UI',sans-serif; }
+        #map { height:100vh; width:100%; }
+        .header {
+            position:absolute; top:10px; left:50%; transform:translateX(-50%);
+            background:rgba(255,255,255,0.96); padding:12px 30px; border-radius:10px;
+            box-shadow:0 4px 20px rgba(0,0,0,0.2); z-index:1000; text-align:center;
+            font-weight:bold; font-size:1.35em; color:#1a3c6e;
+        }
+        .layer-control {
+            position:absolute; top:50px; left:20px; background:white; padding:15px;
+            border-radius:10px; box-shadow:0 4px 20px rgba(0,0,0,0.2); z-index:1000;
+            max-height:88vh; overflow-y:auto; min-width:200px; font-size:0.95em;
+        }
+        .legend {
+            position:absolute; bottom:20px; right:20px; background:white; padding:15px;
+            border-radius:10px; box-shadow:0 4px 20px rgba(0,0,0,0.2); z-index:1000;
+            font-size:0.9em; line-height:1.6; max-width:250px;
+        }
+        .legend-item { display:flex; align-items:center; margin:5px 0; }
+        .color-box { width:24px; height:24px; margin-right:12px; border:1px solid #555; border-radius:4px; }
+        .info-box {
+            position:absolute; bottom:70px; left:10px; background:white; padding:15px;
+            border-radius:10px; box-shadow:0 4px 20px rgba(0,0,0,0.2); z-index:1000;
+            max-width:360px; display:none;
+        }
+
+        /* Bigger Proposed Facility Icons */
+        .proposed-marker {
+            font-size: 28px !important;
+            text-align: center;
+            line-height: 35px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">Kolkata Healthcare Access Dashboard</div>
+    <div id="map"></div>
+
+    <div class="layer-control">
+        <strong>Toggle Layers</strong><br><br>
+        <input type="checkbox" id="boundaryToggle" checked> Kolkata Boundary<br><br>
+        
+        <strong>Road Networks:</strong><br>
+        <input type="checkbox" id="primaryToggle" checked> <span style="color:#e74c3c">● Primary</span><br>
+        <input type="checkbox" id="secondaryToggle" checked> <span style="color:#f39c12">● Secondary</span><br>
+        <input type="checkbox" id="tertiaryToggle" checked> <span style="color:#3498db">● Tertiary</span><br>
+        <input type="checkbox" id="residentialToggle" checked> <span style="color:#7f8c8d">● Residential</span><br><br>
+        
+        <input type="checkbox" id="hospitalToggle" checked> 🏥 Hospitals<br>
+        <input type="checkbox" id="popDensityToggle" checked> 🌍 Population Density (Wards)<br>
+        <input type="checkbox" id="underservedToggle"> 🔴 Underserved Areas<br>
+        <input type="checkbox" id="proposedToggle" checked> 📍 Proposed New Facilities
+    </div>
+
+    <div class="legend" id="legend">
+        <strong>Legend</strong><br>
+        <div id="legendContent"></div>
+    </div>
+
+    <div class="info-box" id="infoBox">
+        <strong>Point Analysis</strong><br><br>
+        <div id="analysisContent"></div>
+        <button onclick="resetAnalysis()">Reset Analysis</button>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.markercluster@1.5.0/dist/leaflet.markercluster.js"></script>
+    <script>
+       const map = L.map('map', { 
+    zoomControl: false 
+}).setView([22.5726, 88.3639], 12);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        // Layer Groups
+        const boundaryLayer = L.layerGroup().addTo(map);
+        const primaryLayer = L.layerGroup().addTo(map);
+        const secondaryLayer = L.layerGroup().addTo(map);
+        const tertiaryLayer = L.layerGroup().addTo(map);
+        const residentialLayer = L.layerGroup().addTo(map);
+        const hospitalLayer = L.markerClusterGroup().addTo(map);
+        const popDensityLayer = L.layerGroup().addTo(map);
+        const underservedLayer = L.layerGroup();
+        const proposedLayer = L.layerGroup();
+
+        let currentRouteLayer = null;
+        let hospitalsData = [];
+
+        // Load Boundary
+        fetch('kolkata_boundary.geojson').then(r => r.json()).then(data => {
+            L.geoJSON(data, {style: {color: "#1a3c6e", weight: 5, opacity: 0.9, fillOpacity: 0.08}}).addTo(boundaryLayer);
+        });
+
+        // Load Roads
+        function loadRoads(file, group, color, weight) {
+            fetch(file).then(r => r.json()).then(geo => L.geoJSON(geo, {style: {color, weight, opacity: 0.85}}).addTo(group));
+        }
+        loadRoads('primary_roads.geojson', primaryLayer, '#e74c3c', 5);
+        loadRoads('secondary_roads.geojson', secondaryLayer, '#f39c12', 4);
+        loadRoads('tertiary_roads.geojson', tertiaryLayer, '#3498db', 3.5);
+        loadRoads('residential_roads.geojson', residentialLayer, '#7f8c8d', 2.5);
+
+        // Hospitals with Load Status
+        fetch('hospitals.geojson').then(r => r.json()).then(data => {
+            hospitalsData = data.features;
+            L.geoJSON(data, {
+                pointToLayer: (feature, latlng) => {
+                    const loadLevel = calculateHospitalLoad(feature);
+                    let color = "#2ecc71";
+                    if (loadLevel > 1.5) color = "#e74c3c";
+                    else if (loadLevel > 0.8) color = "#f1c40f";
+
+                    return L.circleMarker(latlng, {
+                        radius: 9,
+                        fillColor: color,
+                        color: "#fff",
+                        weight: 2.5,
+                        fillOpacity: 0.95
+                    });
+                },
+                onEachFeature: (feature, layer) => {
+                    const loadLevel = calculateHospitalLoad(feature);
+                    const status = loadLevel > 1.5 ? "Overloaded" : loadLevel > 0.8 ? "Balanced" : "Underutilised";
+                    layer.bindPopup(`
+                        <b>${feature.properties.name || 'Hospital'}</b><br>
+                        Load Level: ${loadLevel.toFixed(2)}<br>
+                        Status: <b>${status}</b>
+                    `);
+                }
+            }).addTo(hospitalLayer);
+        });
+
+        function calculateHospitalLoad(hospital) {
+            const hLatLng = L.latLng(hospital.geometry.coordinates[1], hospital.geometry.coordinates[0]);
+            let score = 0, count = 0;
+            hospitalsData.forEach(h => {
+                if (h === hospital) return;
+                const dist = hLatLng.distanceTo(L.latLng(h.geometry.coordinates[1], h.geometry.coordinates[0]));
+                if (dist < 8000) {
+                    score += (8000 - dist) / 8000;
+                    count++;
+                }
+            });
+            return count > 0 ? (score / count) * 3 : 1.0;
+        }
+
+        // Population Density
+        fetch('https://raw.githubusercontent.com/datameet/Municipal_Spatial_Data/master/Kolkata/kolkata.geojson')
+            .then(r => r.json()).then(geojson => {
+                L.geoJSON(geojson, {
+                    style: f => ({
+                        color: '#333', weight: 1.2,
+                        fillColor: getDensityColor(getWardDensity(f.properties.WARD || f.properties.ward)),
+                        fillOpacity: 0.72
+                    })
+                }).addTo(popDensityLayer);
+            });
+
+        function getWardDensity(ward) {
+            const base = 22000;
+            const num = parseInt(ward) || 70;
+            return base + Math.sin(num) * 18000 + (num % 30) * 800;
+        }
+        function getDensityColor(d) {
+            if (d > 45000) return '#800026';
+            if (d > 35000) return '#bd0026';
+            if (d > 28000) return '#e31a1c';
+            if (d > 22000) return '#fc4e2a';
+            if (d > 15000) return '#fd8d3c';
+            return '#feb24c';
+        }
+
+        // Underserved Areas
+        const underservedPoints = [
+            [22.58, 88.42], [22.50, 88.45], [22.62, 88.35], 
+            [22.48, 88.32], [22.55, 88.48]
+        ];
+        underservedPoints.forEach(pt => {
+            L.circle(pt, {radius: 3500, color: "#e74c3c", fillOpacity: 0.25, weight: 1}).addTo(underservedLayer);
+        });
+
+        // Proposed New Facilities - BIGGER ICONS
+        const proposedFacilities = [
+            {name: "Proposed Facility 1 - East Kolkata", lat: 22.58, lng: 88.42, reason: "High density, poor access"},
+            {name: "Proposed Facility 2 - South Kolkata", lat: 22.48, lng: 88.32, reason: "Underserved residential area"},
+            {name: "Proposed Facility 3 - North Kolkata", lat: 22.62, lng: 88.35, reason: "High population growth zone"}
+        ];
+
+        proposedFacilities.forEach(f => {
+            L.marker([f.lat, f.lng], {
+                icon: L.divIcon({
+                    className: 'proposed-marker',
+                    html: '📍',
+                    iconSize: [45, 45],      // Bigger size
+                    iconAnchor: [22, 45]
+                })
+            }).bindPopup(`<b>${f.name}</b><br>${f.reason}`).addTo(proposedLayer);
+        });
+
+        // Click Analysis
+        map.on('click', async function(e) {
+            resetAnalysis();
+            const clickPoint = e.latlng;
+
+            let nearest = null;
+            let minDist = Infinity;
+            hospitalsData.forEach(h => {
+                const hLatLng = L.latLng(h.geometry.coordinates[1], h.geometry.coordinates[0]);
+                const dist = clickPoint.distanceTo(hLatLng);
+                if (dist < minDist) {
+                    minDist = dist;
+                    nearest = h;
+                }
+            });
+
+            if (!nearest) return;
+
+            const start = [clickPoint.lat, clickPoint.lng];
+            const dest = [nearest.geometry.coordinates[1], nearest.geometry.coordinates[0]];
+
+            let distanceKm = (minDist / 1000).toFixed(2);
+            let timeCar = Math.round(minDist / 500);
+            let timeWalk = Math.round(minDist / 83);
+
+            document.getElementById('analysisContent').innerHTML = `
+                <b>Nearest Hospital:</b> ${nearest.properties.name || 'Hospital'}<br>
+                <b>Road Distance:</b> ${distanceKm} km<br>
+                <b>Est. Time by Car:</b> ${timeCar} minutes<br>
+                <b>Est. Time by Walking:</b> ${timeWalk} minutes
+            `;
+            document.getElementById('infoBox').style.display = 'block';
+        });
+
+        function resetAnalysis() {
+            if (currentRouteLayer) map.removeLayer(currentRouteLayer);
+            currentRouteLayer = null;
+            document.getElementById('infoBox').style.display = 'none';
+        }
+
+        // Legend
+        document.getElementById('legendContent').innerHTML = `
+            <strong>Roads:</strong><br>
+            <span style="color:#e74c3c">●</span> Primary<br>
+            <span style="color:#f39c12">●</span> Secondary<br>
+            <span style="color:#3498db">●</span> Tertiary<br>
+            <span style="color:#7f8c8d">●</span> Residential<br><br>
+            
+            <strong>Facilities:</strong><br>
+            <span style="color:#e74c3c">●</span> Hospitals<br><br>
+            
+            <strong>Hospital Load Status:</strong><br>
+            <span style="color:#e74c3c">●</span> Overloaded<br>
+            <span style="color:#f1c40f">●</span> Balanced<br>
+            <span style="color:#2ecc71">●</span> Underutilised<br><br>
+            
+            <strong>Population Density (per km²)</strong><br>
+            <div class="legend-item"><div class="color-box" style="background:#800026"></div> &gt; 45,000</div>
+            <div class="legend-item"><div class="color-box" style="background:#bd0026"></div> 35,001 – 45,000</div>
+            <div class="legend-item"><div class="color-box" style="background:#e31a1c"></div> 28,001 – 35,000</div>
+            <div class="legend-item"><div class="color-box" style="background:#fc4e2a"></div> 22,001 – 28,000</div>
+            <div class="legend-item"><div class="color-box" style="background:#fd8d3c"></div> 15,001 – 22,000</div>
+            <div class="legend-item"><div class="color-box" style="background:#feb24c"></div> &lt; 15,000</div>
+        `;
+
+        // Toggles
+        const layerMap = {
+            boundaryToggle: boundaryLayer,
+            primaryToggle: primaryLayer,
+            secondaryToggle: secondaryLayer,
+            tertiaryToggle: tertiaryLayer,
+            residentialToggle: residentialLayer,
+            hospitalToggle: hospitalLayer,
+            popDensityToggle: popDensityLayer,
+            underservedToggle: underservedLayer,
+            proposedToggle: proposedLayer
+        };
+
+        Object.keys(layerMap).forEach(id => {
+            document.getElementById(id).addEventListener('change', function() {
+                if (this.checked) layerMap[id].addTo(map);
+                else layerMap[id].removeFrom(map);
+            });
+        });
+
+        L.control.scale().addTo(map);
+    </script>
+</body>
+</html>
